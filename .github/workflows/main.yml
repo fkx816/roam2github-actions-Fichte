@@ -40,6 +40,6 @@ jobs:
           BACKUP_MARKDOWN: true
 
       - name: Commit Changes
-        uses: wqing2000/git-auto-commit-action@latest
+        uses: everruler12/git-auto-commit-action@latest
         with:
           commit_message: Automatic backup
