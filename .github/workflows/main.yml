@@ -27,7 +27,7 @@ jobs:
       - name: Run Backup
         run: |
           cd /tmp
-          git clone -q https://github.com/fkx816/roam2github.git roam2github
+          git clone -q https://github.com/wqing2000/roam2github.git roam2github
           cd $_
           npm i
           npm run backup -s
