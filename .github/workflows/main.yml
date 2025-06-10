@@ -45,8 +45,8 @@ jobs:
           ROAM_GRAPH: ${{ secrets.ROAM_GRAPH }}
           BACKUP_EDN: false
           BACKUP_JSON: false
-          BACKUP_MARKDOWN: true
-          BACKUP_FLAT_MARKDOWN: false
+          BACKUP_MARKDOWN: false
+          BACKUP_FLAT_MARKDOWN: true
           BACKUP_MSGPACK: false
     
       - name: Commit Changes
