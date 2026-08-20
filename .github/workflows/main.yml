@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:          # 允许手动触发，方便验证修复
   schedule:
       # Here you can change how often your backup runs. See https://crontab.guru/examples.html
       - cron: "30 13,21 * * *"
@@ -12,56 +13,130 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     name: Backup
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ secrets.BACKUP_REPO }}
           token: ${{ secrets.ACCESS_TOKEN }}
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
-      - name: Cache Node.js modules
-        uses: actions/cache@v3.4.3
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          path: ~/.npm
-          key: ${{ runner.OS }}-node-${{ hashFiles('**/package-lock.json') }}
+          node-version: '22'
+
+      # 同时缓存 npm 和 puppeteer 下载的 Chrome（约 150MB，否则每次重新下载）
+      - name: Cache npm + Chromium
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/puppeteer
+          key: ${{ runner.os }}-r2g-puppeteer25-v1
           restore-keys: |
-            ${{ runner.OS }}-node-
-      
+            ${{ runner.os }}-r2g-
+
       - name: Run Backup
         run: |
+          set -euo pipefail
           cd /tmp
           git clone -q https://github.com/everruler12/roam2github.git roam2github
-          cd $_
+          cd roam2github
           python3 - <<'PY'
           from pathlib import Path
+          import sys
+
           p = Path('backup.js')
           s = p.read_text()
-          s = s.replace("""            log('- (Wait for auto-refresh)')\n            // log('- (Wait 10 seconds for auto-refresh)')\n            // await page.waitForTimeout(10000) // because Roam auto refreshes the sign-in page, as mentioned here https://github.com/MatthieuBizien/roam-to-git/issues/87#issuecomment-763281895 (and can be seen in non-headless browser)\n\n            await page.waitForSelector('.loading-astrolabe', { timeout: 20000 })\n            await page.waitForSelector('.loading-astrolabe', { hidden: true })\n            // log('- auto-refreshed')\n""", """            log('- Login page ready')\n            await page.waitForSelector('input[name=\"password\"]')\n""")
-          s = s.replace("""            // log('- Checking for astrolabe spinner')\n            await page.waitForSelector('.loading-astrolabe')\n            log('- astrolabe spinning...')\n\n            //await page.waitForSelector('.loading-astrolabe', { hidden: true })\n            //log('- astrolabe spinning stopped')\n\n            // try {\n            await page.waitForSelector('.roam-app') // add short timeout here, if fails, don't exit code 1, and instead CHECK if have permission to view graph\n""", """            await page.waitForSelector('.roam-app') // add short timeout here, if fails, don't exit code 1, and instead CHECK if have permission to view graph\n""")
-          s = s.replace("""            log('- Checking for \"Export All\" button')\n            await page.waitForFunction(() => [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => button.innerText.match('Export All')))\n\n            log('- Clicking \"Export All\" button')\n            await page.evaluate(() => { [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => button.innerText.match('Export All')).click() })\n""", """            log('- Checking for \"Export\" button')\n            await page.waitForFunction(() => [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => (button.innerText || '').trim() === 'Export'))\n\n            log('- Clicking \"Export\" button')\n            await page.evaluate(() => { [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => (button.innerText || '').trim() === 'Export').click() })\n""")
-          if "loading-astrolabe" in s:
-              print('Warning: loading-astrolabe still present')
+          failed = []
+
+          def sub(label, old, new):
+              global s
+              if old not in s:
+                  failed.append(label)
+                  return
+              s = s.replace(old, new)
+
+          # --- Roam UI 适配（原有补丁）---
+          sub('login-wait', """            log('- (Wait for auto-refresh)')\n            // log('- (Wait 10 seconds for auto-refresh)')\n            // await page.waitForTimeout(10000) // because Roam auto refreshes the sign-in page, as mentioned here https://github.com/MatthieuBizien/roam-to-git/issues/87#issuecomment-763281895 (and can be seen in non-headless browser)\n\n            await page.waitForSelector('.loading-astrolabe', { timeout: 20000 })\n            await page.waitForSelector('.loading-astrolabe', { hidden: true })\n            // log('- auto-refreshed')\n""",
+              """            log('- Login page ready')\n            await page.waitForSelector('input[name="password"]')\n""")
+
+          # 打开 graph：缩短超时 + 失败时导出截图/HTML 便于排查
+          sub('graph-wait', """            // log('- Checking for astrolabe spinner')\n            await page.waitForSelector('.loading-astrolabe')\n            log('- astrolabe spinning...')\n\n            //await page.waitForSelector('.loading-astrolabe', { hidden: true })\n            //log('- astrolabe spinning stopped')\n\n            // try {\n            await page.waitForSelector('.roam-app') // add short timeout here, if fails, don't exit code 1, and instead CHECK if have permission to view graph\n""",
+              """            try {\n                await page.waitForSelector('.roam-app', { timeout: Number(process.env.GRAPH_TIMEOUT || 180000) })\n            } catch (e) {\n                log('- .roam-app never appeared - dumping diagnostics')\n                try { await page.screenshot({ path: '/tmp/r2g-fail.png', fullPage: true }) } catch (_) {}\n                try { require('fs').writeFileSync('/tmp/r2g-fail.html', await page.content()) } catch (_) {}\n                try { log('- page title:', await page.title(), '| url:', page.url()) } catch (_) {}\n                throw e\n            }\n""")
+
+          sub('export-button', """            log('- Checking for "Export All" button')\n            await page.waitForFunction(() => [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => button.innerText.match('Export All')))\n\n            log('- Clicking "Export All" button')\n            await page.evaluate(() => { [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => button.innerText.match('Export All')).click() })\n""",
+              """            log('- Checking for "Export" button')\n            await page.waitForFunction(() => [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => (button.innerText || '').trim() === 'Export'))\n\n            log('- Clicking "Export" button')\n            await page.evaluate(() => { [...document.querySelectorAll('button.bp3-button.bp3-intent-primary')].find(button => (button.innerText || '').trim() === 'Export').click() })\n""")
+
+          # --- 新版 puppeteer API 适配 ---
+          # page._client 在 puppeteer 15+ 变成方法，官方 API 是 createCDPSession()
+          sub('cdp-session', """                    await page._client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: download_dir })""",
+              """                    await (await page.createCDPSession()).send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: download_dir })""")
+
+          # page.waitForTimeout 在 puppeteer 22 中已移除
+          sub('wait-timeout', """            await page.waitForTimeout(1000)""",
+              """            await new Promise(r => setTimeout(r, 1000))""")
+
+          if failed:
+              print('ERROR: 以下补丁未匹配到上游代码，backup.js 可能已变更: ' + ', '.join(failed), file=sys.stderr)
+              sys.exit(1)
+
           p.write_text(s)
-          print('Patched backup.js')
+          print('Patched backup.js (5/5)')
           PY
-          npm i
+
+          # 关键修复：上游锁定 puppeteer 5.5.0（Chromium 88 / 2020年11月），已跑不动 Roam 现在的前端
+          rm -f package-lock.json
+          npm pkg set dependencies.puppeteer="^25"
+          npm i --no-audit --no-fund
+          node -e "console.log('puppeteer', require('puppeteer/package.json').version)"
+
           npm run backup -s
         env:
           ROAM_EMAIL: ${{ secrets.ROAM_EMAIL }}
           ROAM_PASSWORD: ${{ secrets.ROAM_PASSWORD }}
           ROAM_GRAPH: ${{ secrets.ROAM_GRAPH }}
+          GRAPH_TIMEOUT: 180000
           BACKUP_EDN: false
           BACKUP_JSON: false
           BACKUP_MARKDOWN: true
           BACKUP_FLAT_MARKDOWN: false
           BACKUP_MSGPACK: false
-    
+
+      # 失败时把截图和 HTML 传上来，下次就能直接看到 Roam 页面到底停在哪
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: roam-failure-diagnostics
+          path: |
+            /tmp/r2g-fail.png
+            /tmp/r2g-fail.html
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Commit Changes
         uses: everruler12/git-auto-commit-action@latest
         with:
           commit_message: Automatic backup
+
+  # 防止 GitHub 因仓库 60 天无提交而自动禁用定时任务（本仓库本身从不产生提交，
+  # 备份都提交到 BACKUP_REPO，所以极易触发禁用）
+  keepalive:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Empty commit if repo has been idle
+        run: |
+          set -euo pipefail
+          AGE=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "距上次提交 $AGE 天"
+          if [ "$AGE" -ge 45 ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive"
+            git push
+          fi
