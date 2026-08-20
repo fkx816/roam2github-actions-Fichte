@@ -116,9 +116,17 @@ jobs:
           retention-days: 7
 
       - name: Commit Changes
-        uses: everruler12/git-auto-commit-action@latest
+        # 原先用的 everruler12 fork 声明 using:'node12'，已停更 5 年且落后上游 254 个提交，
+        # GitHub 移除 Node 20 运行时后必挂。上游 v7 原生跑 Node 24。
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: Automatic backup
+          # fork 相对上游的唯一实质改动就是给 git commit 加 -q，
+          # 避免把上千个笔记文件名打进公开仓库的 Actions 日志
+          commit_options: '-q'
+          # 保持备份仓库的提交者身份与历史一致（上游默认已改成 github-actions[bot]）
+          commit_user_name: GitHub Actions
+          commit_user_email: actions@github.com
 
   # 防止 GitHub 因仓库 60 天无提交而自动禁用定时任务（本仓库本身从不产生提交，
   # 备份都提交到 BACKUP_REPO，所以极易触发禁用）
